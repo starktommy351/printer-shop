@@ -5,19 +5,20 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { SP_USERNAME, SP_PASSWORD, SP_PREFIX = 'SP', BASE_URL, AGENT_KEY } = process.env;
+const { SSL_STORE_ID, SSL_STORE_PASS, BASE_URL, AGENT_KEY } = process.env;
 const PRICE = Number(process.env.PRICE_PER_PAGE || 10);
-const SP = process.env.SP_MODE === 'live'
-  ? 'https://engine.shurjopayment.com/api'
-  : 'https://sandbox.shurjopayment.com/api';
+const SSL = process.env.SSL_MODE === 'live'
+  ? 'https://securepay.sslcommerz.com'
+  : 'https://sandbox.sslcommerz.com';
 
 const DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(DIR, { recursive: true });
 const upload = multer({ dest: DIR, limits: { fileSize: 20 * 1024 * 1024 } });
-const jobs = {}; // id -> {id, file, pages, amount, status, spOrderId}
+const jobs = {}; // id -> {id, file, pages, amount, status}
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 1) PDF আপলোড ও পৃষ্ঠা গণনা
@@ -38,58 +39,57 @@ app.post('/api/upload', upload.single('pdf'), async (req, res) => {
   }
 });
 
-// 2) ShurjoPay পেমেন্ট শুরু
+// 2) SSLCommerz পেমেন্ট শুরু
 app.post('/api/pay/:id', async (req, res) => {
   const job = jobs[req.params.id];
   if (!job || job.status !== 'uploaded') return res.status(404).json({ error: 'জব পাওয়া যায়নি' });
   try {
-    const t = await (await fetch(`${SP}/get_token`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: SP_USERNAME, password: SP_PASSWORD })
-    })).json();
-    if (!t.token) throw new Error('token failed');
-    const p = await (await fetch(`${SP}/secret-pay`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `${t.token_type} ${t.token}` },
-      body: JSON.stringify({
-        prefix: SP_PREFIX, token: t.token, store_id: t.store_id,
-        return_url: `${BASE_URL}/api/return`, cancel_url: `${BASE_URL}/?cancelled=1`,
-        amount: job.amount, order_id: job.id, currency: 'BDT',
-        customer_name: req.body.name || 'Customer',
-        customer_phone: req.body.phone || '01700000000',
-        customer_address: 'Bangladesh', customer_city: 'Dhaka', customer_post_code: '1200',
-        client_ip: req.ip || '127.0.0.1'
-      })
-    })).json();
-    if (!p.checkout_url) throw new Error('checkout failed');
-    job.spOrderId = p.sp_order_id;
-    res.json({ url: p.checkout_url });
+    const body = new URLSearchParams({
+      store_id: SSL_STORE_ID,
+      store_passwd: SSL_STORE_PASS,
+      total_amount: String(job.amount),
+      currency: 'BDT',
+      tran_id: job.id,
+      success_url: `${BASE_URL}/api/success`,
+      fail_url: `${BASE_URL}/api/fail`,
+      cancel_url: `${BASE_URL}/api/cancel`,
+      cus_name: req.body.name || 'Customer',
+      cus_email: 'customer@example.com',
+      cus_add1: 'Bangladesh',
+      cus_city: 'Dhaka',
+      cus_country: 'Bangladesh',
+      cus_phone: req.body.phone || '01700000000',
+      shipping_method: 'NO',
+      product_name: 'PDF Print',
+      product_category: 'Service',
+      product_profile: 'general'
+    });
+    const r = await (await fetch(`${SSL}/gwprocess/v4/api.php`, { method: 'POST', body })).json();
+    if (!r.GatewayPageURL) throw new Error(r.failedreason || 'no url');
+    res.json({ url: r.GatewayPageURL });
   } catch (e) {
     res.status(500).json({ error: 'পেমেন্ট শুরু করা যায়নি' });
   }
 });
 
-// 3) পেমেন্ট শেষে ShurjoPay এখানে ফেরত পাঠায়, আমরা সার্ভার থেকে যাচাই করি
-app.get('/api/return', async (req, res) => {
+// 3) পেমেন্ট শেষে SSLCommerz এখানে POST করে, আমরা সার্ভার থেকে যাচাই করি
+app.post('/api/success', async (req, res) => {
   try {
-    const t = await (await fetch(`${SP}/get_token`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: SP_USERNAME, password: SP_PASSWORD })
-    })).json();
-    const v = await (await fetch(`${SP}/verification`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `${t.token_type} ${t.token}` },
-      body: JSON.stringify({ order_id: req.query.order_id })
-    })).json();
-    const r = Array.isArray(v) ? v[0] : v;
-    const job = r && jobs[r.customer_order_id];
-    if (job && Number(r.sp_code) === 1000 && job.status === 'uploaded') {
-      job.status = 'paid';
-      return res.redirect(`/?done=${job.id}`);
+    const { val_id } = req.body;
+    const url = `${SSL}/validator/api/validationserverAPI.php?val_id=${encodeURIComponent(val_id)}` +
+      `&store_id=${encodeURIComponent(SSL_STORE_ID)}&store_passwd=${encodeURIComponent(SSL_STORE_PASS)}&format=json`;
+    const v = await (await fetch(url)).json();
+    const job = jobs[v.tran_id];
+    const ok = v.status === 'VALID' || v.status === 'VALIDATED';
+    if (job && ok && parseFloat(v.amount) >= job.amount) {
+      if (job.status === 'uploaded') job.status = 'paid';
+      return res.redirect(303, `/?done=${job.id}`);
     }
   } catch (e) {}
-  res.redirect('/?failed=1');
+  res.redirect(303, '/?failed=1');
 });
+app.post('/api/fail', (req, res) => res.redirect(303, '/?failed=1'));
+app.post('/api/cancel', (req, res) => res.redirect(303, '/?cancelled=1'));
 
 app.get('/api/status/:id', (req, res) => {
   const j = jobs[req.params.id];
