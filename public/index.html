@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>অনলাইন প্রিন্ট</title>
+<style>
+  :root { --bg:#f5f7fa; --card:#fff; --text:#1a1a1a; --muted:#666; --brand:#0a7d4f; --line:#dde2e8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14181c; --card:#1e2429; --text:#eee; --muted:#9aa4ad; --line:#333b42; } }
+  body { margin:0; font-family: system-ui, "Noto Sans Bengali", sans-serif; background:var(--bg); color:var(--text); display:flex; justify-content:center; padding:24px 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px; width:100%; max-width:420px; }
+  h1 { font-size:22px; margin:0 0 4px; } p.sub { color:var(--muted); margin:0 0 20px; }
+  input, button { width:100%; box-sizing:border-box; font-size:16px; padding:12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); margin-bottom:12px; }
+  button { background:var(--brand); color:#fff; border:0; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; }
+  .sum { background:var(--bg); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .sum b { font-size:20px; }
+  .msg { padding:12px; border-radius:10px; margin-bottom:12px; }
+  .ok { background:#d9f5e7; color:#0a5; } .err { background:#fde2e2; color:#b00; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🖨️ অনলাইন প্রিন্ট</h1>
+  <p class="sub">PDF আপলোড করুন, পেমেন্ট করুন, প্রিন্ট হয়ে যাবে। প্রতি পৃষ্ঠা ১০ টাকা।</p>
+  <div id="msg" class="msg hide"></div>
+  <div id="step1">
+    <input type="file" id="file" accept="application/pdf">
+    <button id="upBtn">আপলোড করুন</button>
+  </div>
+  <div id="step2" class="hide">
+    <div class="sum">পৃষ্ঠা: <b id="pg"></b><br>মোট: <b id="amt"></b> টাকা</div>
+    <input id="name" placeholder="আপনার নাম">
+    <input id="phone" placeholder="মোবাইল নম্বর" inputmode="tel">
+    <button id="payBtn">পেমেন্ট করুন</button>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let jobId = null;
+function show(text, ok) { const m = $('msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+
+const q = new URLSearchParams(location.search);
+if (q.get('done')) { $('step1').classList.add('hide'); show('পেমেন্ট সফল! আপনার ফাইল প্রিন্টে পাঠানো হয়েছে।', true); }
+if (q.get('failed')) show('পেমেন্ট যাচাই করা যায়নি। আবার চেষ্টা করুন।');
+if (q.get('cancelled')) show('পেমেন্ট বাতিল করা হয়েছে।');
+
+$('upBtn').onclick = async () => {
+  const f = $('file').files[0];
+  if (!f) return show('আগে একটি PDF বেছে নিন');
+  $('upBtn').disabled = true;
+  const fd = new FormData(); fd.append('pdf', f);
+  try {
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    jobId = d.id; $('pg').textContent = d.pages; $('amt').textContent = d.amount;
+    $('step1').classList.add('hide'); $('step2').classList.remove('hide'); $('msg').className = 'msg hide';
+  } catch (e) { show(e.message || 'আপলোড হয়নি'); $('upBtn').disabled = false; }
+};
+
+$('payBtn').onclick = async () => {
+  $('payBtn').disabled = true;
+  try {
+    const r = await fetch('/api/pay/' + jobId, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: $('name').value, phone: $('phone').value })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    location.href = d.url;
+  } catch (e) { show(e.message || 'পেমেন্ট শুরু হয়নি'); $('payBtn').disabled = false; }
+};
+</script>
+</body>
+</html>
